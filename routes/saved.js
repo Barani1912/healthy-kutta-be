@@ -1,28 +1,8 @@
 import { Router } from 'express';
-import { supabase, createUserClient } from '../lib/supabase.js';
+import { createUserClient } from '../lib/supabase.js';
+import { requireAuth } from '../lib/authMiddleware.js';
 
 const router = Router();
-
-/**
- * Middleware: extract user from Authorization header
- */
-async function requireAuth(req, res, next) {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Authentication required.' });
-    }
-
-    const token = authHeader.split(' ')[1];
-    const { data, error } = await supabase.auth.getUser(token);
-
-    if (error || !data.user) {
-        return res.status(401).json({ error: 'Invalid or expired token.' });
-    }
-
-    req.user = data.user;
-    req.accessToken = token;
-    next();
-}
 
 // ─── Diet Plans ───
 
@@ -116,11 +96,14 @@ router.post('/food-comparisons', requireAuth, async (req, res) => {
             .select()
             .single();
 
-        if (error) throw error;
+        if (error) {
+            console.error('Supabase insert error [food-comparisons]:', error);
+            throw error;
+        }
         res.json(data);
     } catch (err) {
-        console.error('Save comparison error:', err);
-        res.status(500).json({ error: 'Failed to save food comparison.' });
+        console.error('Save comparison exception:', err);
+        res.status(500).json({ error: err.message || 'Failed to save food comparison.' });
     }
 });
 
