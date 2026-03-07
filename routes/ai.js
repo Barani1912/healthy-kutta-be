@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { FOOD_ANALYSIS_PROMPT, MEAL_PLAN_PROMPT, NUTRITION_NEWS_PROMPT, SYMPTOM_REMEDY_PROMPT, GROCERY_LIST_PROMPT, DOSHA_ANALYZER_PROMPT, FOOD_LOG_SUMMARY_PROMPT, HYDRATION_ADVISOR_PROMPT } from '../lib/prompts.js';
+import { resolveNutritionData } from '../lib/nutritionResolver.js';
 
 
 
@@ -100,40 +101,28 @@ router.post('/food-analysis', async (req, res) => {
             return res.status(400).json({ error: 'No valid food names provided.' });
         }
 
-        const userPrompt = `Analyze these food items for a Tamil Nadu user: ${safeFoods.join(', ')}
+        const apiCallFn = async (foodList) => {
+            const userPrompt = `Analyze these food items for a Tamil Nadu user: ${foodList.join(', ')}
 
 Provide complete nutritional information, optimal timing, health benefits, food combinations (compatible & incompatible), preparation guidelines, and health warnings for each item. Also analyze the combination if multiple items are selected.`;
 
-        const parsed = await callLLM(FOOD_ANALYSIS_PROMPT, userPrompt);
+            const parsed = await callLLM(FOOD_ANALYSIS_PROMPT, userPrompt);
 
-        if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
-            return res.status(500).json({ error: 'AI response did not contain food analysis data.' });
+            if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
+                throw new Error('AI response did not contain food analysis data.');
+            }
+            return parsed;
+        };
+
+        const result = await resolveNutritionData(safeFoods, apiCallFn);
+
+        if (result.source === 'not_found' || result.error) {
+            return res.status(404).json({ error: result.error || 'Food not found.' });
         }
 
-        res.json(parsed);
+        res.json(result);
     } catch (err) {
         console.error('Food analysis error:', err);
-        // Fallback for UI review if API is down
-        if (err.message.includes('401') || err.message.includes('key')) {
-            console.log('Serving fallback analysis due to auth error.');
-            return res.json({
-                items: req.body.foods.map(f => ({
-                    name: f,
-                    nutrition_per_100g: { calories: 95, protein: 0.8, carbs: 23, fats: 0.3, fiber: 2.6 },
-                    health_benefits: ["Rich in Vitamin C", "Good for digestion", "Natural energy booster"],
-                    optimal_timing: { best_time: "morning", reasoning: "Provides natural sugars for energy." },
-                    preparation_guidelines: { dos: ["Wash thoroughly", "Eat fresh"], donts: ["Don't overcook", "Avoid adding processed sugar"] },
-                    health_warnings: ["High sugar content for diabetics"]
-                })),
-                combination_analysis: {
-                    aggregated_nutrition: { calories: 150, protein: 1.5, carbs: 35, fats: 0.5, fiber: 4.0 },
-                    best_time: "morning",
-                    best_time_reasoning: "Combination is best as a breakfast supplement.",
-                    compatible_suggestions: [{ suggestion: "Add nuts", reason: "For healthy fats and crunch." }],
-                    incompatible_pairs: []
-                }
-            });
-        }
         res.status(500).json({ error: err.message || 'Failed to analyze food. Please try again.' });
     }
 });
@@ -478,6 +467,35 @@ router.post('/hydration-advisor', async (req, res) => {
         res.json(parsed);
     } catch (err) {
         console.error('Hydration advisor error:', err);
+        if (err.message.includes('401') || err.message.includes('key') || err.message.includes('fetch') || err.message.includes('parse')) {
+            console.log('Serving fallback hydration advice due to auth or API error.');
+            return res.json({
+                daily_water_ml: (req.body.weight || 70) * 35,
+                daily_water_glasses: Math.round(((req.body.weight || 70) * 35) / 250),
+                calculation_basis: "Fallback calculation: weight-based at 35ml/kg.",
+                hydration_schedule: [
+                    { time: "On waking (6-7 AM)", amount: "400ml", tip: "Start with warm water — flushes toxins as per Siddha tradition" },
+                    { time: "Before breakfast", amount: "250ml", tip: "Prepares digestive system" },
+                    { time: "Mid-morning", amount: "500ml", tip: "Maintains energy" },
+                    { time: "Afternoon", amount: "500ml", tip: "Prevents afternoon slump" }
+                ],
+                tn_hydration_drinks: [
+                    { name: "Nannari Sherbet", benefit: "Cooling, reduces body heat (pitta), excellent for Tamil Nadu summers", when: "Afternoon 3-4 PM" },
+                    { name: "Neer Mor (Spiced Buttermilk)", benefit: "Probiotic, restores electrolytes", when: "Mid-day" }
+                ],
+                supplements: [
+                    {
+                        name: "Sabja Seeds (Basil Seeds)",
+                        tamil_name: "Sabja Vithai",
+                        benefit: "Cools the body, aids digestion, high in fiber",
+                        how_to_use: "Soak 1 tsp in 200ml water for 15 minutes, drink daily",
+                        best_for: "Weight management, digestion, body heat"
+                    }
+                ],
+                dehydration_warnings: ["Dark yellow urine", "Headaches by mid-afternoon", "Dry lips and mouth"],
+                seasonal_note: "Remember to increase water intake by 500ml if you sweat heavily."
+            });
+        }
         res.status(500).json({ error: err.message || 'Failed to generate hydration advice.' });
     }
 });
