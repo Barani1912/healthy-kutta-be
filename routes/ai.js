@@ -10,7 +10,7 @@ const router = Router();
 const OPENROUTER_URL = process.env.OPENROUTER_URL;
 const HK_OPENROUTER_KEY = process.env.HK_OPENROUTER_KEY;
 const MODEL = process.env.MODEL;
-const SITE_URL = process.env.SITE_URL || 'http://localhost:3000';
+const SITE_URL = process.env.SITE_URL || 'https://healthy-kutta-ui.vercel.app';
 
 /**
  * Helper: call OpenRouter API

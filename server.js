@@ -10,8 +10,16 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // ─── Middleware ───
+const allowedOrigins = [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'https://healthy-kutta-ui.vercel.app',
+    process.env.FRONTEND_URL,
+    process.env.SITE_URL
+].filter(Boolean);
+
 app.use(cors({
-    origin: ['http://localhost:3000', 'http://localhost:5173'],
+    origin: allowedOrigins,
     credentials: true
 }));
 app.use(express.json({ limit: '1mb' }));
