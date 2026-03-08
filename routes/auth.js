@@ -5,7 +5,7 @@ import { sanitizeEmail, sanitizeName, sanitizeString, validatePasswordStrength }
 
 const router = Router();
 
-const SITE_URL = process.env.SITE_URL || 'https://healthy-kutta-ui.vercel.app';
+const SITE_URL = process.env.SITE_URL;
 
 // ─── Rate Limiters ───
 

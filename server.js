@@ -9,9 +9,13 @@ import aiRoutes from './routes/ai.js';
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Trust the first proxy (required for Render / any reverse-proxy host)
+// Without this, express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+app.set('trust proxy', 1);
+
 // ─── Middleware ───
 const allowedOrigins = [
-    'https://healthy-kutta-ui.vercel.app',
+    'http://localhost:3000',
     process.env.SITE_URL
 ].filter(Boolean);
 
@@ -33,5 +37,5 @@ app.get('/api/health', (req, res) => {
 
 // ─── Start ───
 app.listen(PORT, () => {
-    console.log(`🚀 Healthy Kutta Backend running on http://localhost:${PORT}`);
+    console.log(`🚀 Healthy Kutta Backend running`);
 });

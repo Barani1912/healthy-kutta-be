@@ -10,7 +10,7 @@ const router = Router();
 const OPENROUTER_URL = process.env.OPENROUTER_URL;
 const HK_OPENROUTER_KEY = process.env.HK_OPENROUTER_KEY;
 const MODEL = process.env.MODEL;
-const SITE_URL = process.env.SITE_URL || 'https://healthy-kutta-ui.vercel.app';
+const SITE_URL = process.env.SITE_URL;
 
 /**
  * Helper: call OpenRouter API
@@ -148,7 +148,7 @@ router.post('/meal-plan', async (req, res) => {
 
 Ensure the plan follows Tamil Nadu cuisine, respects the ${dietaryPreference} dietary preference strictly, and provides 7 full days of variety.`;
 
-        const parsed = await callLLM(MEAL_PLAN_PROMPT, userPrompt, { temperature: 0.5, maxTokens: 6000 });
+        const parsed = await callLLM(MEAL_PLAN_PROMPT, userPrompt, { temperature: 0.5, maxTokens: 4250 });
 
         if (!parsed.seven_day_plan || !Array.isArray(parsed.seven_day_plan)) {
             return res.status(500).json({ error: 'AI returned invalid meal plan format.' });
@@ -157,8 +157,10 @@ Ensure the plan follows Tamil Nadu cuisine, respects the ${dietaryPreference} di
         res.json(parsed);
     } catch (err) {
         console.error('Meal plan error:', err);
-        if (err.message.includes('401') || err.message.includes('key')) {
-            console.log('Serving fallback meal plan due to auth error.');
+        const isAuthError = err.message.includes('401') || err.message.includes('key');
+        const isEmptyResponse = err.message.includes('Empty response') || err.message.includes('empty');
+        if (isAuthError || isEmptyResponse) {
+            console.log('Serving fallback meal plan due to:', isAuthError ? 'auth error' : 'empty AI response');
             return res.json({
                 seven_day_plan: Array.from({ length: 7 }, (_, i) => ({
                     day_number: i + 1,
