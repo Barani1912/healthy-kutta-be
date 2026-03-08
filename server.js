@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 
 import authRoutes from './routes/auth.js';
 import savedRoutes from './routes/saved.js';
@@ -24,6 +25,7 @@ app.use(cors({
     credentials: true
 }));
 app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());
 
 // ─── Routes ───
 app.use('/auth', authRoutes);

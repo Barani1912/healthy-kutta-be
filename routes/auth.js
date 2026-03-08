@@ -2,6 +2,7 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { supabase, createUserClient } from '../lib/supabase.js';
 import { sanitizeEmail, sanitizeName, sanitizeString, validatePasswordStrength } from '../lib/sanitize.js';
+import { requireAuth } from '../middlewares/auth.js';
 
 const router = Router();
 
@@ -127,6 +128,14 @@ router.post('/login', loginLimiter, async (req, res) => {
 
         const fullName = data.user?.user_metadata?.full_name || '';
 
+        // Set HttpOnly cookie
+        res.cookie('access_token', data.session.access_token, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+            maxAge: 5 * 60 * 60 * 1000 // 5 hours
+        });
+
         res.json({
             user: {
                 id: data.user?.id,
@@ -134,6 +143,7 @@ router.post('/login', loginLimiter, async (req, res) => {
                 name: fullName,
             },
             session: {
+                // Keep returning session just in case, but frontend ignores it
                 access_token: data.session?.access_token,
                 refresh_token: data.session?.refresh_token,
             },
@@ -211,11 +221,18 @@ router.post('/reset-password', async (req, res) => {
 
 /**
  * POST /api/auth/logout
- * Headers: Authorization: Bearer <token>
+ * Headers: Cookie: access_token=<token>
  */
-router.post('/logout', async (req, res) => {
+router.post('/logout', requireAuth, async (req, res) => {
     try {
         const { error } = await supabase.auth.signOut();
+        // Clear cookie regardless of Supabase error to ensure local session ends
+        res.clearCookie('access_token', {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+        });
+
         if (error) {
             return res.status(400).json({ error: error.message });
         }
@@ -228,35 +245,18 @@ router.post('/logout', async (req, res) => {
 
 /**
  * GET /api/auth/me
- * Headers: Authorization: Bearer <token>
+ * Headers: Cookie: access_token=<token>
  */
-router.get('/me', async (req, res) => {
-    try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader?.startsWith('Bearer ')) {
-            return res.status(401).json({ error: 'No token provided.' });
-        }
+router.get('/me', requireAuth, async (req, res) => {
+    const fullName = req.user.user_metadata?.full_name || '';
 
-        const token = authHeader.split(' ')[1];
-        const { data, error } = await supabase.auth.getUser(token);
-
-        if (error || !data.user) {
-            return res.status(401).json({ error: 'Invalid or expired token.' });
-        }
-
-        const fullName = data.user.user_metadata?.full_name || '';
-
-        res.json({
-            user: {
-                id: data.user.id,
-                email: data.user.email,
-                name: fullName,
-            },
-        });
-    } catch (err) {
-        console.error('Auth check error:', err);
-        res.status(500).json({ error: 'Failed to verify authentication.' });
-    }
+    res.json({
+        user: {
+            id: req.user.id,
+            email: req.user.email,
+            name: fullName,
+        },
+    });
 });
 
 export default router;
