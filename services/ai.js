@@ -15,16 +15,8 @@ const HK_OPENROUTER_KEY = process.env.HK_OPENROUTER_KEY;
 const MODEL = process.env.MODEL;
 const SITE_URL = process.env.SITE_URL;
 
-/**
- * Helper: call OpenRouter API
- */
 async function callLLM(systemPrompt, userPrompt, { temperature = 0.3, maxTokens = 8192 } = {}) {
-    if (!HK_OPENROUTER_KEY) {
-        throw new Error('HK_OPENROUTER_KEY is not defined in backend .env');
-    }
-
-    console.log(`[AI] Calling model ${MODEL} with maxTokens=${maxTokens}`);
-
+    if (!HK_OPENROUTER_KEY) throw new Error('HK_OPENROUTER_KEY is not defined');
     const response = await fetch(OPENROUTER_URL, {
         method: 'POST',
         headers: {
@@ -43,100 +35,77 @@ async function callLLM(systemPrompt, userPrompt, { temperature = 0.3, maxTokens 
             max_tokens: maxTokens
         })
     });
-
     if (!response.ok) {
-        let errMessage = `OpenRouter API error: ${response.status}`;
-        try {
-            const errData = await response.json();
-            errMessage += ` — ${errData?.error?.message || JSON.stringify(errData)}`;
-        } catch (e) {
-            const text = await response.text().catch(() => '');
-            errMessage += ` — ${text || 'Unknown error'}`;
-        }
-        throw new Error(errMessage);
+        let em = `Error: ${response.status}`;
+        try { const d = await response.json(); em += ` - ${d?.error?.message || JSON.stringify(d)}`; } catch(e) { em += ` - ${await response.text().catch(()=>'')}`; }
+        throw new Error(em);
     }
-
     const data = await response.json();
     const text = data?.choices?.[0]?.message?.content;
-
-    if (!text) {
-        throw new Error('Empty response from AI.');
-    }
-
+    if (!text) throw new Error('Empty response from AI.');
     try {
         const start = text.indexOf('{');
         const end = text.lastIndexOf('}');
-
-        if (start === -1 || end === -1) {
-            throw new Error('No valid JSON object found in response.');
-        }
-
-        const jsonStr = text.substring(start, end + 1);
-        return JSON.parse(jsonStr);
-    } catch (parseErr) {
-        throw new Error(`Failed to parse AI response: ${parseErr.message}`);
-    }
+        if (start === -1 || end === -1) throw new Error('No JSON object found.');
+        return JSON.parse(text.substring(start, end + 1));
+    } catch (parseErr) { throw new Error(`Parse error: ${parseErr.message}`); }
 }
 
 export async function analyzeFood(foods) {
-    const safeFoods = foods
-        .map(f => String(f).replace(/[<>{}]/g, '').trim())
-        .filter(f => f.length >= 1 && f.length <= 100);
-
-    if (safeFoods.length === 0) {
-        throw new Error('No valid food names provided.');
-    }
-
+    const safeFoods = foods.map(f => String(f).replace(/[<>{}]/g, '').trim()).filter(f => f.length >= 1);
+    if (safeFoods.length === 0) throw new Error('No valid foods.');
     const apiCallFn = async (foodList) => {
-        const userPrompt = `Analyze these food items for a Tamil Nadu user: ${foodList.join(', ')}\n\nProvide complete nutritional information, optimal timing, health benefits, food combinations (compatible & incompatible), preparation guidelines, and health warnings for each item. Also analyze the combination if multiple items are selected.`;
-
-        const parsed = await callLLM(FOOD_ANALYSIS_PROMPT, userPrompt);
-
-        if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
-            throw new Error('AI response did not contain food analysis data.');
-        }
+        const parsed = await callLLM(FOOD_ANALYSIS_PROMPT, `Analyze: ${foodList.join(', ')}`);
+        if (!parsed.items?.length) throw new Error('No analysis data.');
         return parsed;
     };
-
     const result = await resolveNutritionData(safeFoods, apiCallFn);
-
-    if (result.source === 'not_found' || result.error) {
-        throw { status: 404, message: result.error || 'Food not found.' };
-    }
-
+    if (result.error) throw { status: 404, message: result.error };
     return result;
 }
 
 export async function generateMealPlan(profile) {
-    const { height, weight, age, gender, activity, goal, dietaryPreference, targetCalories, targetProtein } = profile;
-
-    const userPrompt = `Generate a 7-day Tamil Nadu meal plan for:\n- Profile: ${gender}, ${age} years, ${height}cm, ${weight}kg\n- Activity: ${activity}\n- Goal: ${goal}\n- Targets: ${targetCalories} kcal/day, ${targetProtein}g protein/day\n- Dietary Preference: ${dietaryPreference}\n\nEnsure the plan follows Tamil Nadu cuisine, respects the ${dietaryPreference} dietary preference strictly, and provides 7 full days of variety.`;
-
+    const { targetCalories: tc, targetProtein: tp, gender, age, height, weight, activity, goal, dietaryPreference: dp } = profile;
+    const isNonVeg = dp?.toLowerCase().includes('non');
+    const dietNote = isNonVeg ? 'NON-VEGETARIAN (include meat/fish/eggs)' : 'VEGETARIAN (no meat/eggs)';
+    const userPrompt = `7-day TN plan: ${gender}, ${age}y, ${height}cm, ${weight}kg. Target: ${tc}kcal, ${tp}g protein. Diet: ${dietNote}. 0 repeats.`;
+    
     try {
-        const parsed = await callLLM(MEAL_PLAN_PROMPT, userPrompt, { temperature: 0.5, maxTokens: 4250 });
-        if (!parsed.seven_day_plan || !Array.isArray(parsed.seven_day_plan)) {
-            throw new Error('AI returned invalid meal plan format.');
-        }
+        const parsed = await callLLM(MEAL_PLAN_PROMPT, userPrompt, { temperature: 0.8, maxTokens: 6192 });
+        if (!parsed.seven_day_plan) throw new Error('Invalid format.');
         return parsed;
     } catch (err) {
-        const isAuthError = err.message.includes('401') || err.message.includes('key');
-        const isEmptyResponse = err.message.includes('Empty response') || err.message.includes('empty');
-        if (isAuthError || isEmptyResponse) {
-            console.log('Serving fallback meal plan due to API error.');
+        if (err.message.includes('401') || err.message.includes('empty') || err.message.includes('response')) {
+            const cal = tc || 2000;
+            const prot = tp || 60;
+            const vegDays = [
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Idli (3) with Sambar', calories: Math.round(cal * 0.15), health_benefit: 'Probiotic' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Banana', calories: Math.round(cal * 0.07), health_benefit: 'Energy' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Rice with Dal and Poriyal', calories: Math.round(cal * 0.30), health_benefit: 'Fiber' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Sundal', calories: Math.round(cal * 0.08), health_benefit: 'Protein' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Ragi Dosa', calories: Math.round(cal * 0.17), health_benefit: 'Calcium' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Upma', calories: Math.round(cal * 0.14), health_benefit: 'Quick energy' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Coconut Water', calories: Math.round(cal * 0.03), health_benefit: 'Electrolytes' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Sambar Rice', calories: Math.round(cal * 0.30), health_benefit: 'Balanced' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Roasted Chana', calories: Math.round(cal * 0.07), health_benefit: 'Protein' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Chapati with Kurma', calories: Math.round(cal * 0.19), health_benefit: 'Antioxidants' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Oats Pongal', calories: Math.round(cal * 0.15), health_benefit: 'Heart healthy' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Buttermilk', calories: Math.round(cal * 0.04), health_benefit: 'Gut health' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Tamarind Rice', calories: Math.round(cal * 0.28), health_benefit: 'Digestion' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Sweet Corn', calories: Math.round(cal * 0.07), health_benefit: 'Fiber' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Pesarattu', calories: Math.round(cal * 0.17), health_benefit: 'Protein' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Kara Pongal', calories: Math.round(cal * 0.16), health_benefit: 'Comfort' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Papaya', calories: Math.round(cal * 0.05), health_benefit: 'Vitamins' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Curd Rice', calories: Math.round(cal * 0.27), health_benefit: 'Probiotics' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Mint Tea', calories: Math.round(cal * 0.07), health_benefit: 'Digestion' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Veg Fried Rice', calories: Math.round(cal * 0.18), health_benefit: 'Balanced' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Adai with Avial', calories: Math.round(cal * 0.17), health_benefit: 'Protein' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Pomegranate', calories: Math.round(cal * 0.06), health_benefit: 'Antioxidants' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Lemon Rice', calories: Math.round(cal * 0.28), health_benefit: 'Vitamin C' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Groundnut Chaat', calories: Math.round(cal * 0.07), health_benefit: 'Protein' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Roti with Dal', calories: Math.round(cal * 0.18), health_benefit: 'Fiber' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Set Dosa', calories: Math.round(cal * 0.16), health_benefit: 'Soft' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Nuts', calories: Math.round(cal * 0.06), health_benefit: 'Healthy fats' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Tomato Rice', calories: Math.round(cal * 0.30), health_benefit: 'Lycopene' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Corn Chaat', calories: Math.round(cal * 0.07), health_benefit: 'Fiber' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Venpongal', calories: Math.round(cal * 0.17), health_benefit: 'Comfort' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Puttu', calories: Math.round(cal * 0.18), health_benefit: 'Fiber' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Lime Juice', calories: Math.round(cal * 0.02), health_benefit: 'Vitamin C' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Red Rice with Veg Kuzhambu', calories: Math.round(cal * 0.30), health_benefit: 'Fiber' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Tender Coconut', calories: Math.round(cal * 0.05), health_benefit: 'Hydration' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Idiyappam', calories: Math.round(cal * 0.17), health_benefit: 'Light' }] }
+            ];
+            const nonVegDays = [
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Egg Dosa', calories: Math.round(cal * 0.16), health_benefit: 'Protein' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Boiled Egg', calories: Math.round(cal * 0.08), health_benefit: 'Protein' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Rice with Chicken Kuzhambu', calories: Math.round(cal * 0.32), health_benefit: 'Iron' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Peanuts', calories: Math.round(cal * 0.08), health_benefit: 'Protein' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Fish Curry with Rice', calories: Math.round(cal * 0.20), health_benefit: 'Omega-3' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Idli with Mutton Keema Sambar', calories: Math.round(cal * 0.17), health_benefit: 'Iron' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Coconut Water', calories: Math.round(cal * 0.03), health_benefit: 'Electrolytes' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Prawn Masala Rice', calories: Math.round(cal * 0.31), health_benefit: 'Selenium' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Chicken Sandwich', calories: Math.round(cal * 0.09), health_benefit: 'Protein' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Chapati with Egg Curry', calories: Math.round(cal * 0.18), health_benefit: 'Balanced' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Omelette with Toast', calories: Math.round(cal * 0.17), health_benefit: 'Protein' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Buttermilk', calories: Math.round(cal * 0.05), health_benefit: 'Gut health' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Chicken Biryani', calories: Math.round(cal * 0.33), health_benefit: 'High protein' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Fish Cutlet', calories: Math.round(cal * 0.09), health_benefit: 'Omega-3' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Ragi Dosa with Chicken', calories: Math.round(cal * 0.18), health_benefit: 'Calcium' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Egg Appam', calories: Math.round(cal * 0.16), health_benefit: 'Fermented' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Papaya', calories: Math.round(cal * 0.05), health_benefit: 'Enzymes' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Mutton Kuzhambu', calories: Math.round(cal * 0.32), health_benefit: 'Iron' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Boiled Eggs', calories: Math.round(cal * 0.09), health_benefit: 'Protein' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Fish Fry', calories: Math.round(cal * 0.19), health_benefit: 'Protein' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Chicken Keema Parotta', calories: Math.round(cal * 0.19), health_benefit: 'Filling' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Pomegranate', calories: Math.round(cal * 0.06), health_benefit: 'Antioxidants' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Prawn Thokku', calories: Math.round(cal * 0.30), health_benefit: 'Fiber' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Grilled Chicken', calories: Math.round(cal * 0.09), health_benefit: 'Lean protein' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Egg Fried Rice', calories: Math.round(cal * 0.18), health_benefit: 'Balanced' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Pesarattu with Egg', calories: Math.round(cal * 0.17), health_benefit: 'Protein' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Nuts', calories: Math.round(cal * 0.07), health_benefit: 'Fats' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Fish Curry', calories: Math.round(cal * 0.31), health_benefit: 'Omega-3' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Chicken Soup', calories: Math.round(cal * 0.08), health_benefit: 'Immunity' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Mutton Broth', calories: Math.round(cal * 0.17), health_benefit: 'Restorative' }] },
+                { meals: [{ time: '07:30 AM', meal_type: 'Breakfast', description: 'Puttu with Egg Curry', calories: Math.round(cal * 0.19), health_benefit: 'Fiber' }, { time: '10:30 AM', meal_type: 'Mid-Morning', description: 'Lime Juice', calories: Math.round(cal * 0.02), health_benefit: 'Vitamin C' }, { time: '01:00 PM', meal_type: 'Lunch', description: 'Chicken Kuzhambu', calories: Math.round(cal * 0.31), health_benefit: 'Minerals' }, { time: '04:30 PM', meal_type: 'Evening', description: 'Fish Sardine', calories: Math.round(cal * 0.09), health_benefit: 'Calcium' }, { time: '08:00 PM', meal_type: 'Dinner', description: 'Egg Dosa', calories: Math.round(cal * 0.18), health_benefit: 'Protein' }] }
+            ];
+            const dNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+            const pDays = isNonVeg ? nonVegDays : vegDays;
             return {
-                seven_day_plan: Array.from({ length: 7 }, (_, i) => ({
+                seven_day_plan: pDays.map((d, i) => ({
                     day_number: i + 1,
-                    day_name: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][i],
-                    daily_totals: { calories: targetCalories || 2000, protein: targetProtein || 60 },
-                    meals: [
-                        { time: "08:30 AM", meal_type: "Breakfast", description: "Idli with Sambar and Coconut Chutney", calories: 350, health_benefit: "Probiotic and easy to digest" },
-                        { time: "11:00 AM", meal_type: "Mid-Morning", description: "Fresh Coconut Water or Buttermilk", calories: 50, health_benefit: "Hydration and minerals" },
-                        { time: "01:30 PM", meal_type: "Lunch", description: "Brown Rice with Spinach Kootu and Rasam", calories: 600, health_benefit: "High fiber and iron" },
-                        { time: "05:00 PM", meal_type: "Evening", description: "Sundal (Chickpea salad)", calories: 200, health_benefit: "Plant-based protein" },
-                        { time: "08:30 PM", meal_type: "Dinner", description: "Ragi Dosa with Vegetable Salna", calories: 400, health_benefit: "Calcium and complex carbs" }
-                    ]
+                    day_name: dNames[i],
+                    daily_totals: { calories: cal, protein: prot },
+                    meals: d.meals
                 })),
-                general_advice: ["Drink at least 3 liters of water", "Walk for 30 minutes daily", "Avoid processed sugars"]
+                general_advice: ['Drink 3L water', 'Walk 30m', 'Limit sugar']
             };
         }
         throw err;
@@ -145,118 +114,106 @@ export async function generateMealPlan(profile) {
 
 export async function getNutritionNews() {
     try {
-        const userPrompt = `Generate the top 10 latest food and nutrition news articles for today. Cover a mix of global and Indian nutritional topics. Focus only on food, nutrition, diet, and wellness. Return valid JSON only.`;
-        const parsed = await callLLM(NUTRITION_NEWS_PROMPT, userPrompt, { temperature: 0.6, maxTokens: 3000 });
+        const p = await callLLM(NUTRITION_NEWS_PROMPT, 'News.', { temperature: 0.6, maxTokens: 3000 });
+        if (!p.articles) throw new Error('Invalid format');
+        return p;
+    } catch (e) {
+        return { articles: [{ headline: "Millets Popularity", summary: "Ragi/Samai resurgence.", category: "traditional-wisdom", source: "NRI" }] };
+    }
+}
 
-        if (!parsed.articles || !Array.isArray(parsed.articles)) {
-            throw new Error('Invalid news format from AI');
-        }
-        return parsed;
-    } catch (err) {
-        console.log('Serving fallback static news due to API error.');
+export async function getSymptomRemedy(symptom) {
+    const s = symptom.replace(/[<>{}]/g, '').trim().slice(0, 300);
+    if (s.length < 3) throw new Error('Too short.');
+    const p = await callLLM(SYMPTOM_REMEDY_PROMPT, `Symptom: "${s}"`, { temperature: 0.4, maxTokens: 4096 });
+    if (!p.foods_to_eat) throw new Error('Missing data');
+    return p;
+}
+
+export async function generateGroceryList(plan) {
+    const summary = plan.map(d => `${d.day_name || `Day ${d.day_number}`}: ${(d.meals || []).map(m => m.description).join('; ')}`).join('\n');
+    try {
+        const p = await callLLM(GROCERY_LIST_PROMPT, `Extract ingredients:\n${summary}`, { temperature: 0.4, maxTokens: 4500 });
+        if (!p.categories) throw new Error('Invalid data');
+        return p;
+    } catch(err) {
+        console.error('Grocery List AI Error:', err.message);
         return {
-            articles: [
+            title: "Weekly Groceries (Fallback)",
+            total_items: 20,
+            categories: [
                 {
-                    headline: "Traditional Millets Regain Global Popularity for Diabetes Management",
-                    summary: "As the health benefits of ancient grains become clearer, millets like Ragi and Samai are seeing a massive resurgence in South Indian diets...",
-                    category: "traditional-wisdom",
-                    source: "Nutrition Research Institute",
-                    image: "/news/news_millets.png"
+                    key: "grains",
+                    label: "Grains",
+                    items: [
+                        { name: "Rice (Brown/White)", quantity: "2 kg" },
+                        { name: "Idli Rice", quantity: "1 kg" },
+                        { name: "Urad Dal", quantity: "500 g" },
+                        { name: "Wheat Flour", quantity: "1 kg" }
+                    ]
                 },
-                // Omitting other fallbacks to save space; frontend can handle
+                {
+                    key: "produce",
+                    label: "Produce",
+                    items: [
+                        { name: "Onions & Tomatoes", quantity: "2 kg" },
+                        { name: "Mixed Veg", quantity: "1.5 kg" },
+                        { name: "Green Mix", quantity: "200 g" }
+                    ]
+                },
+                {
+                    key: "dairy_protein",
+                    label: "Dairy & Protein",
+                    items: [
+                        { name: "Eggs/Meat", quantity: "Depends" },
+                        { name: "Milk", quantity: "3 Liters" },
+                        { name: "Toor Dal", quantity: "1 kg" }
+                    ]
+                },
+                {
+                    key: "spices",
+                    label: "Spices",
+                    items: [
+                        { name: "Cooking Oil", quantity: "1 Liter" },
+                        { name: "Basic Spices", quantity: "Assorted" }
+                    ]
+                }
             ]
         };
     }
 }
 
-export async function getSymptomRemedy(symptom) {
-    const sanitized = symptom.replace(/[<>{}]/g, '').trim().slice(0, 300);
-    if (sanitized.length < 3) {
-        throw new Error('Symptom description is too short.');
-    }
-
-    const userPrompt = `The user is experiencing the following health symptom or concern: "${sanitized}"\n\nProvide Tamil Nadu-specific food remedies, herbs, lifestyle tips, and a clear when-to-see-a-doctor warning for this symptom.`;
-
-    const parsed = await callLLM(SYMPTOM_REMEDY_PROMPT, userPrompt, { temperature: 0.4, maxTokens: 4096 });
-
-    if (!parsed.symptom_understood || !parsed.foods_to_eat || !parsed.herbs_and_remedies) {
-        throw new Error('AI response did not contain the expected remedy data.');
-    }
-    return parsed;
+export async function analyzeDosha(ans) {
+    const txt = Object.entries(ans).map(([q, a]) => `${q}: ${a}`).join('\n');
+    const p = await callLLM(DOSHA_ANALYZER_PROMPT, `Analyze:\n${txt}`, { temperature: 0.4, maxTokens: 4096 });
+    if (!p.primary_dosha) throw new Error('Invalid analysis');
+    return p;
 }
 
-export async function generateGroceryList(sevenDayPlan) {
-    const mealSummary = sevenDayPlan.map(day => {
-        const dayLabel = day.day_name || `Day ${day.day_number}`;
-        const meals = (day.meals || []).map(m => m.description).join('; ');
-        return `${dayLabel}: ${meals}`;
-    }).join('\n');
-
-    const userPrompt = `Here is a 7-day Tamil Nadu meal plan. Extract all ingredients needed and return a categorized weekly grocery list:\n\n${mealSummary}`;
-
-    const parsed = await callLLM(GROCERY_LIST_PROMPT, userPrompt, { temperature: 0.3, maxTokens: 2500 });
-
-    if (!parsed.categories || !Array.isArray(parsed.categories) || parsed.categories.length === 0) {
-        throw new Error('AI response did not contain a valid grocery list.');
-    }
-    return parsed;
-}
-
-export async function analyzeDosha(quizAnswers) {
-    const answerText = Object.entries(quizAnswers)
-        .map(([q, a]) => `${q}: ${a}`)
-        .join('\n');
-
-    const userPrompt = `Here are my quiz answers about my body and lifestyle. Please analyze my dosha:\n\n${answerText}`;
-
-    const parsed = await callLLM(DOSHA_ANALYZER_PROMPT, userPrompt, { temperature: 0.4, maxTokens: 4096 });
-    if (!parsed.primary_dosha || !parsed.foods_to_favor) {
-        throw new Error('AI response did not contain a valid dosha analysis.');
-    }
-    return parsed;
-}
-
-export async function generateFoodLogSummary(entries, targetCalories) {
-    const logText = entries.map(e => `${e.time || ''} — ${e.meal}: ${e.description || e.meal}`).join('\n');
-    const targetNote = targetCalories ? `\nUser's daily calorie target: ${targetCalories} kcal.` : '';
-
-    const userPrompt = `Here are today's food entries:\n\n${logText}${targetNote}\n\nPlease analyze this and return the nutritional summary.`;
-
-    const parsed = await callLLM(FOOD_LOG_SUMMARY_PROMPT, userPrompt, { temperature: 0.3, maxTokens: 1200 });
-
-    if (!parsed.estimated_totals || !parsed.tips) {
-        throw new Error('AI response did not contain a valid food log summary.');
-    }
-    return parsed;
+export async function generateFoodLogSummary(entries, tc) {
+    const log = entries.map(e => `${e.time || ''} — ${e.meal}: ${e.description}`).join('\n');
+    const p = await callLLM(FOOD_LOG_SUMMARY_PROMPT, `Log:\n${log}\nTarget: ${tc}`, { temperature: 0.3, maxTokens: 1200 });
+    if (!p.estimated_totals) throw new Error('Invalid summary');
+    return p;
 }
 
 export async function generateHydrationAdvice(profile) {
-    const { weight, age, activityLevel, climate, healthGoal, season } = profile;
-    const userPrompt = `My profile:\n- Weight: ${weight}kg\n- Age: ${age} years\n- Activity Level: ${activityLevel}\n- Climate / Location: ${climate || 'Tamil Nadu, South India'}\n- Season: ${season || 'Summer (March-June)'}\n- Health Goal: ${healthGoal || 'General wellness'}\n\nPlease calculate my optimal daily water intake and give supplement recommendations.`;
-
+    const { weight: w, age: a, activityLevel: al, climate: c, healthGoal: g, season: s } = profile;
+    const prompt = `Profile: ${w}kg, ${a}y, Activity: ${al}, ${c}, ${s}, Goal: ${g}`;
     try {
-        const parsed = await callLLM(HYDRATION_ADVISOR_PROMPT, userPrompt, { temperature: 0.4, maxTokens: 1800 });
-        if (!parsed.daily_water_ml || !parsed.supplements) {
-            throw new Error('AI response did not contain valid hydration advice.');
-        }
-        return parsed;
-    } catch (err) {
-        if (err.message.includes('401') || err.message.includes('key') || err.message.includes('fetch') || err.message.includes('parse')) {
-            return {
-                daily_water_ml: (weight || 70) * 35,
-                daily_water_glasses: Math.round(((weight || 70) * 35) / 250),
-                calculation_basis: "Fallback calculation: weight-based at 35ml/kg.",
-                hydration_schedule: [
-                    { time: "On waking (6-7 AM)", amount: "400ml", tip: "Start with warm water" }
-                ],
-                tn_hydration_drinks: [
-                    { name: "Neer Mor", benefit: "Probiotic", when: "Mid-day" }
-                ],
-                supplements: [],
-                dehydration_warnings: ["Dark yellow urine"],
-                seasonal_note: "Remember to increase water intake by 500ml if you sweat heavily."
-            };
-        }
-        throw err;
+        const p = await callLLM(HYDRATION_ADVISOR_PROMPT, prompt, { temperature: 0.4, maxTokens: 1800 });
+        if (!p.daily_water_ml) throw new Error('Invalid advice');
+        return p;
+    } catch (e) {
+        return {
+            daily_water_ml: (w || 70) * 35,
+            daily_water_glasses: Math.round(((w || 70) * 35) / 250),
+            calculation_basis: "Fallback: 35ml/kg",
+            hydration_schedule: [{ time: "Waking", amount: "400ml", tip: "Warm water" }],
+            tn_hydration_drinks: [{ name: "Neer Mor", benefit: "Probiotic", when: "Mid-day" }],
+            supplements: [],
+            dehydration_warnings: ["Dark urine"],
+            seasonal_note: "Drink more if sweating."
+        };
     }
 }

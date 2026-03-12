@@ -58,12 +58,13 @@ export async function getSymptomRemedy(req, res) {
 
 export async function getGroceryList(req, res) {
     try {
-        const { sevenDayPlan } = req.body;
-        if (!sevenDayPlan || !Array.isArray(sevenDayPlan) || sevenDayPlan.length === 0) {
+        const plan = req.body.sevenDayPlan || req.body.seven_day_plan;
+        
+        if (!plan || !Array.isArray(plan) || plan.length === 0) {
             return res.status(400).json({ error: 'Please provide the sevenDayPlan array.' });
         }
 
-        const result = await aiService.generateGroceryList(sevenDayPlan);
+        const result = await aiService.generateGroceryList(plan);
         res.json(result);
     } catch (err) {
         console.error('Grocery list error:', err);
